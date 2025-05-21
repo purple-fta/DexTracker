@@ -22,7 +22,7 @@ CHAIN = "bsc"
 PAIR_API_URL = f"https://api.dexscreener.com/latest/dex/pairs/{CHAIN}/{TOKEN_ADDRESS}"
 N = 12  # 12 цен за час (каждые 5 минут)
 PRICE_CHECK_INTERVAL = int(3600/N)  # 5 минут
-REPORT_INTERVAL = 10  # 2 часа
+REPORT_INTERVAL = 60 * 60 * 2  # 2 часа
 BUTTON_LABEL = "Отчёт"
 PERCENT = 1.03
 
