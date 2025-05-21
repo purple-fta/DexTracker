@@ -1,12 +1,17 @@
 
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, CallbackContext
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, ReplyKeyboardMarkup
-
 from dotenv import load_dotenv
+from loguru import logger
 import requests
+import sys
 import os
 
+
+# --- Настроики логов ---
+logger.remove()
+logger.add(sys.stdout, format="<level>{message}</level>")
 
 # --- Настройки ---
 load_dotenv()
@@ -17,7 +22,7 @@ CHAIN = "bsc"
 PAIR_API_URL = f"https://api.dexscreener.com/latest/dex/pairs/{CHAIN}/{TOKEN_ADDRESS}"
 N = 12  # 12 цен за час (каждые 5 минут)
 PRICE_CHECK_INTERVAL = int(3600/N)  # 5 минут
-REPORT_INTERVAL = 4 * 60 * 60  # 4 часа
+REPORT_INTERVAL = 10  # 2 часа
 BUTTON_LABEL = "Отчёт"
 PERCENT = 1.03
 
@@ -70,6 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard_label, resize_keyboard=True)
     await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=reply_markup, parse_mode="HTML")
 
+# --- Форматирует цену ---
 def format_price(price: float) -> str:
     str_price = str(price)
     _, frac_part = str_price.split('.')
@@ -77,9 +83,9 @@ def format_price(price: float) -> str:
     leading_zeros_len = len(frac_part) - len(frac_part.lstrip('0'))
     return f"0.{"0"*leading_zeros_len}<b>{frac_part.lstrip('0')}</b>"
 
-
 # --- Регулярный отчёт ---
-async def send_report(app):
+async def send_report(context: CallbackContext):
+    logger.info("🕓 Отправка отчёта")
     global last_report_price, last_report_cap
     price, cap = fetch_token_data()
     if price is None:
@@ -98,7 +104,7 @@ async def send_report(app):
         last_report_price = price
     
     for chat_id in subscribers:
-        await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")  
+        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")  
     
     update_last_report_date()
 
@@ -107,36 +113,40 @@ def get_avg_price():
     return sum(prices) / len(prices)
 
 # --- Получить данные и в случае чего отправить если ---
-async def check_and_notify(app):
+async def check_and_notify(context: CallbackContext):
     price, cap = fetch_token_data()
     if price:
+        logger.info("📊 Сбор статистики")
         avg_price = get_avg_price()
         prices.append(price)
         caps.append(cap)
         prices.pop(0)
         caps.pop(0)
         if price > avg_price * PERCENT:
+            logger.info("💹 Отправка письма счастья")
             price_change_percent = ((price - avg_price) / avg_price) * 100
             msg = (
                 f"🟢🟢🟢🟢🟢🟢\n",
-                f"Цена выросла на <b>{avg_price}%<b> за час!\n"
+                f"Цена выросла на <b>{price_change_percent}%<b> за час!\n"
                 f"💸: ${format_price(price)}\n"
                 f"💰: ${cap}\n"
             )
             for chat_id in subscribers:
-                await app.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
+                await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
 
 # --- Обработка сообщений для нажатия кнопки ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text # type: ignore
     if text == BUTTON_LABEL:
-        await send_report(context.application)
-
+        logger.info("🔽 Кнопка нажата")
+        await send_report(context)
 
 # --- Основная функция ---
 def main():
+    logger.info("▶️ Начало роботы")
     if TELEGRAM_TOKEN is None:
-        raise ValueError("TELEGRAM_TOKEN is not set in environment variables.")
+        logger.info("⚠️ Незагруженны переменные среды")
+        return
     
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
@@ -153,12 +163,14 @@ def main():
             prices.append(price)
             caps.append(cap)
 
-    app.run_polling()
+    if app.job_queue is None:
+        logger.info(f"⚠️ Отсутствует планировщик задач")    
+        return
+    
+    app.job_queue.run_repeating(send_report, REPORT_INTERVAL)
+    app.job_queue.run_repeating(check_and_notify, PRICE_CHECK_INTERVAL)
 
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: send_report(app), "interval", seconds=REPORT_INTERVAL)
-    scheduler.add_job(lambda: check_and_notify(app), "interval", seconds=PRICE_CHECK_INTERVAL)
-    scheduler.start()
+    app.run_polling()
 
 
 if __name__ == "__main__":
